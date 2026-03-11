@@ -1,0 +1,40 @@
+# PERFTEST_CMD=
+# Specify the perftest command (ib_write_bw, ib_write_lat, ...) 
+# the script automatically appends the -q, -p, -s, -d, --tclass and <host> (only for client)
+# options with the value configured in following section
+# Other options can be confiured here along with the command
+#  
+# e.g: 
+# PERFTEST_CMD='/usr/bin/ib_write_lat -m 1024 --munic-export'
+# 
+# PERFTEST_CMD='/opt/maca/samples/mccl_tests/ib_perf/tests/ib_write_bw --report_gbits -D 5'
+PERFTEST_CMD='/opt/maca/samples/mccl_tests/ib_perf/tests/ib_write_bw --report_gbits --run_infinitely'
+
+# Specify the mpirun path along with addional arguments, 
+# Support absolute and relative path
+# e.g: 
+# MPIRUN_CMD='/usr/local/bin/mpirun -x DESIRED_ENV_VAR=no_space_value'
+MPIRUN_CMD='/opt/maca/ompi/bin/mpirun  -x OMPI_MCA_pml=ob1   -x OMPI_MCA_btl=self,vader,tcp   -mca btl_tcp_if_include inbond1 -mca oob_tcp_if_include inbond1'
+
+# List of clients, 
+# client format: <hostname>:<nic_device>
+# The client order defines pairing with SERVER
+ CLIENTS='ai01:munic0 ai02:munic0 ai03:munic0 ai04:munic0 ai01:munic1 ai02:munic1 ai03:munic1 ai04:munic1 ai01:munic2 ai02:munic2 ai03:munic2 ai04:munic2 ai01:munic3 ai02:munic3 ai03:munic3 ai04:munic3 ai01:munic4 ai02:munic4 ai03:munic4 ai04:munic4 ai01:munic5 ai02:munic5 ai03:munic5 ai04:munic5 ai01:munic6 ai02:munic6 ai03:munic6 ai04:munic6 ai01:munic7 ai02:munic7 ai03:munic7 ai04:munic7 ai01:munic8 ai02:munic8 ai03:munic8 ai04:munic8 ai01:munic9 ai02:munic9 ai03:munic9 ai04:munic9 ai01:munic10 ai02:munic10 ai03:munic10 ai04:munic10 ai01:munic11 ai02:munic11 ai03:munic11 ai04:munic11 ai01:munic12 ai02:munic12 ai03:munic12 ai04:munic12 ai01:munic13 ai02:munic13 ai03:munic13 ai04:munic13 ai01:munic14 ai02:munic14 ai03:munic14 ai04:munic14 ai01:munic15 ai02:munic15 ai03:munic15 ai04:munic15'
+
+SERVERS='ai02:munic0 ai03:munic0 ai04:munic0 ai01:munic0 ai02:munic1 ai03:munic1 ai04:munic1 ai01:munic1 ai02:munic2 ai03:munic2 ai04:munic2 ai01:munic2 ai02:munic3 ai03:munic3 ai04:munic3 ai01:munic3 ai02:munic4 ai03:munic4 ai04:munic4 ai01:munic4 ai02:munic5 ai03:munic5 ai04:munic5 ai01:munic5 ai02:munic6 ai03:munic6 ai04:munic6 ai01:munic6 ai02:munic7 ai03:munic7 ai04:munic7 ai01:munic7 ai02:munic8 ai03:munic8 ai04:munic8 ai01:munic8 ai02:munic9 ai03:munic9 ai04:munic9 ai01:munic9 ai02:munic10 ai03:munic10 ai04:munic10 ai01:munic10 ai02:munic11 ai03:munic11 ai04:munic11 ai01:munic11 ai02:munic12 ai03:munic12 ai04:munic12 ai01:munic12 ai02:munic13 ai03:munic13 ai04:munic13 ai01:munic13 ai02:munic14 ai03:munic14 ai04:munic14 ai01:munic14 ai02:munic15 ai03:munic15 ai04:munic15 ai01:munic15'
+
+# The base used to calcuate a unique -p option value for each perftest pair
+BASE_PORT=30000
+
+# The QP number, used as the -q option value
+QP_NUM=1
+
+# The message size, used as the -s option value
+MESSAGE_SIZE=65536
+
+# The traffic class, used as the --tclass option value
+TC_CLASS=0
+
+# Set the LD_LIBRARY_PATH environment value used in ompi ranks
+# e.g
+# CFG_LD_LIBRARY_PATH=/path/to/rdma-core/lib

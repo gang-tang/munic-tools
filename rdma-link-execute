@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+# Show RDMA link info with appended IP address of the associated netdev
+# Requires: rdma, ip
+cmd="$@"
+
+while IFS= read -r line; do
+    # Extract netdev name: "netdev eth0"
+    netdev=$(echo "$line" | sed -n 's/.*netdev \([a-zA-Z0-9_.-]*\).*/\1/p')
+    rdmadev=$(echo "$line" | cut -d' ' -f2 | cut -d'/' -f1)
+
+    if [[ -n "$netdev" ]]; then
+	CMD="${cmd//NETDEV/$netdev}"
+	echo "▶ Executing on $rdmadev: $CMD"
+	$CMD
+	echo ""
+    fi
+
+done < <(rdma link)

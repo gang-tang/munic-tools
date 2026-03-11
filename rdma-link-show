@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+
+# Show RDMA link info with appended IP address of the associated netdev
+# Requires: rdma, ip
+
+while IFS= read -r line; do
+    # Extract netdev name: "netdev eth0"
+    netdev=$(echo "$line" | sed -n 's/.*netdev \([a-zA-Z0-9_.-]*\).*/\1/p')
+
+    if [[ -n "$netdev" ]]; then
+        # Get primary IPv4 address (or "-" if none)
+        ipaddr=$(ip -4 addr show "$netdev" | awk '/inet / {print $2; exit}')
+
+        if [[ -z "$ipaddr" ]]; then
+            ipaddr="-"  # no IPv4 found
+        fi
+	mtu=$(ip link show "$netdev" | grep -oP 'mtu \K[0-9]+')
+    
+    mac_address=$(ip link show dev "$netdev" 2>/dev/null | grep -oP 'link/ether \K[0-9a-f:]+' | head -1)
+    ETHTOOL_OUTPUT=$(ethtool -i "$netdev" 2>/dev/null)
+    # Extract firmware-version using grep and sed
+    FIRMWARE_VERSION=$(echo "$ETHTOOL_OUTPUT" | grep -i "firmware-version:" | sed 's/firmware-version://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
+
+    # Extract version using grep and sed
+    VERSION=$(echo "$ETHTOOL_OUTPUT" | grep -i "^version:" | sed 's/version://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    
+    # Extract bus-info using grep and sed
+    BUS_INFO=$(echo "$ETHTOOL_OUTPUT" | grep -i "bus-info:" | sed 's/bus-info://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    echo "$line ip $ipaddr mtu $mtu"
+    # Display the extracted information
+    echo "mac $mac_address bus $BUS_INFO firmware $FIRMWARE_VERSION driver $VERSION"
+	dcb pfc show dev "$netdev"
+	dcb app show dev "$netdev"
+	echo ""
+    else
+        echo "$line ip -"
+    fi
+
+done < <(rdma link)

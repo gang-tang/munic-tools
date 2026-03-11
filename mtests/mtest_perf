@@ -1,0 +1,303 @@
+#!/bin/bash
+
+# Configuration and Command Line Storage Variables
+CONFIG_FILE=""
+
+# Temporary variables for command-line arguments to prevent conflict
+# before the configuration file is sourced.
+CMD_QP_NUM=""
+CMD_MSG_SIZE=""
+CMD_TC_CLASS=""
+CMD_RUN_ID=""
+CMD_ENABLE_BIND_CORE=""
+CMD_ENABLE_EXPORT=""
+
+# Default application name for usage message
+APP_NAME=$(basename "$0")
+
+# Final application variables (These will be set by the config file and potentially overridden)
+# PERFTEST_CMD, CLIENTS, SERVERS, BASE_PORT, QP_NUM, MESSAGE_SIZE, TC_CLASS
+# are expected to be set by the config file.
+
+# Function to display usage information
+usage() {
+    echo "Usage: $APP_NAME -c <config_file> [-q <qp_count>] [-m <msg_size>] [-t <traffic_class>] [-b] [-e]"
+    echo ""
+    echo "Options:"
+    echo "  -c <config_file>    Specify the path to the configuration file (REQUIRED)."
+    echo "  -q <qp_count>       Specify the number of QPs (optional)."
+    echo "  -r <run_id>         Specify the label used to identify this running (optional)."
+    echo "  -m <msg_size>       Specify the message size (optional)."
+    echo "  -t <traffic_class>  Specify the traffic class (optional)."
+    echo "  -b                  Bind process to CPU core."
+    echo "  -e                  Export the records."
+    echo ""
+    exit 1
+}
+
+# --- Argument Parsing using getopts ---
+# 'c:', 'q:', 'm:', 't:' all expect an argument.
+while getopts ":c:q:m:t:r:be" opt; do
+    case $opt in
+        c)
+            CONFIG_FILE="$OPTARG"
+            ;;
+        q)
+            CMD_QP_NUM="$OPTARG"
+            ;;
+        r)
+            CMD_RUN_ID="$OPTARG"
+            ;;
+        m)
+            CMD_MSG_SIZE="$OPTARG"
+            ;;
+        t)
+            CMD_TC_CLASS="$OPTARG"
+            ;;
+        b)
+            CMD_ENABLE_BIND_CORE=1
+            ;;
+        e)
+            CMD_ENABLE_EXPORT=1
+            ;;
+        \?)
+            echo "Error: Invalid option: -$OPTARG" >&2
+            usage
+            ;;
+        :)
+            echo "Error: Option -$OPTARG requires an argument." >&2
+            usage
+            ;;
+    esac
+done
+
+# Shift off the options already processed by getopts
+shift $((OPTIND - 1))
+
+# --- Validation and Configuration Loading ---
+
+# 1. Check if the mandatory CONFIG_FILE (-c) was provided.
+if [ -z "$CONFIG_FILE" ]; then
+    echo "Using configuration file ./mtest_perf.env.local"
+    CONFIG_FILE="./mtest_perf.env.local"
+fi
+
+# 2. Check if the mandatory configuration file exists.
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: Specified configuration file not found at '$CONFIG_FILE'." >&2
+    exit 1
+fi
+
+# 3. Load the configuration file content.
+# This sources the file, setting shell variables (QP_NUM, MESSAGE_SIZE, TC_CLASS, etc.)
+echo "Configuration file found. Loading defaults from: $CONFIG_FILE"
+source "$CONFIG_FILE"
+
+# --- Command Line Override Logic ---
+# The variables set by the config file (QP_NUM, MESSAGE_SIZE, TC_CLASS, RUN_ID) are now overridden
+# if a value was supplied via the command line arguments (-q, -m, -t).
+
+# Override QP_NUM if -q was provided
+if [ -n "$CMD_QP_NUM" ]; then
+    QP_NUM="$CMD_QP_NUM"
+    echo "NOTICE: QP_NUM overridden by -q to: $QP_NUM"
+fi
+
+if [ -n "$CMD_ENABLE_BIND_CORE" ]; then
+    ENABLE_BIND_CORE="$CMD_ENABLE_BIND_CORE"
+fi
+
+if [ -n "$CMD_ENABLE_EXPORT" ]; then
+    ENABLE_EXPORT="$CMD_ENABLE_EXPORT"
+fi
+
+# Override QP_NUM if -q was provided
+if [ -n "$CMD_RUN_ID" ]; then
+    RUN_ID="$CMD_RUN_ID"
+fi
+
+# Override MESSAGE_SIZE if -m was provided
+if [ -n "$CMD_MSG_SIZE" ]; then
+    MESSAGE_SIZE="$CMD_MSG_SIZE"
+    echo "NOTICE: MESSAGE_SIZE overridden by -m to: $MESSAGE_SIZE"
+fi
+
+# Override TC_CLASS if -t was provided
+if [ -n "$CMD_TC_CLASS" ]; then
+    TC_CLASS="$CMD_TC_CLASS"
+    echo "NOTICE: TC_CLASS overridden by -t to: $TC_CLASS"
+fi
+
+
+setup_ib_test_env() {
+    # Check if CLIENTS environment variable exists
+    if [[ -z "${CLIENTS+x}" ]]; then
+        echo "Error: CLIENTS environment variable is not set"
+        echo "Please set CLIENTS before running this script"
+        exit 1
+    fi
+
+    # Check if SERVERS environment variable exists
+    if [[ -z "${SERVERS+x}" ]]; then
+        echo "Error: SERVERS environment variable is not set"
+        echo "Please set SERVERS before running this script"
+        exit 1
+    fi
+
+    PERFTEST_CMD="${PERFTEST_CMD:-ib_write_bw}"
+
+    MPIRUN_CMD="${MPIRUN_CMD:-mpirun}"
+    
+    BASE_PORT="${BASE_PORT:-20000}"
+    
+    QP_NUM="${QP_NUM:-1}"
+    
+    MESSAGE_SIZE="${MESSAGE_SIZE:-4096}"
+    
+    TC_CLASS="${TC_CLASS:-0}"
+    
+    # Print the configuration for verification
+    echo "Munic Test Perf Configuration:"
+    echo "  MPIRUN_CMD:         $MPIRUN_CMD"
+    echo "  PERFTEST_CMD:       $PERFTEST_CMD"
+    echo "  CLIENTS:            $CLIENTS"
+    echo "  SERVERS:            $SERVERS"
+    echo "  BASE_PORT:          $BASE_PORT"
+    echo "  QP_NUM:             $QP_NUM"
+    echo "  MESSAGE_SIZE:       $MESSAGE_SIZE"
+    echo "  TC_CLASS:           $TC_CLASS"
+    echo "  LD_LIBRARY_PATH:    $CFG_LD_LIBRARY_PATH"
+    echo "  RUN_ID:             $RUN_ID"
+    echo "  ENABLE_BIND_CORE:   $ENABLE_BIND_CORE"
+    echo "  ENABLE_EXPORT:      $ENABLE_EXPORT"
+}
+# Use CFG_LD_LIBRARY_PATH to avoid conflict with local LD_LIBRARY_PATH
+export_envs () {
+    export PERFTEST_CMD
+    export CLIENTS
+    export SERVERS
+    export BASE_PORT
+    export QP_NUM
+    export MESSAGE_SIZE
+    export TC_CLASS
+    if [ -n "${RUN_ID-}" ]; then
+        export RUN_ID
+    fi
+    if [ -n "${ENABLE_BIND_CORE-}" ]; then
+        export ENABLE_BIND_CORE=1
+    fi
+    if [ -n "${ENABLE_EXPORT-}" ]; then
+        export ENABLE_EXPORT=1
+    fi
+}
+
+mpirun_envs () {
+    ARGS="-x PERFTEST_CMD -x CLIENTS -x SERVERS -x BASE_PORT -x QP_NUM -x MESSAGE_SIZE -x TC_CLASS"
+    ARGS+="${CFG_LD_LIBRARY_PATH:+ -x LD_LIBRARY_PATH=${CFG_LD_LIBRARY_PATH}}"
+    ARGS+="${RUN_ID:+ -x RUN_ID}"
+    ARGS+="${ENABLE_BIND_CORE:+ -x ENABLE_BIND_CORE=1}"
+    ARGS+="${ENABLE_EXPORT:+ -x ENABLE_EXPORT=1}"
+    echo $ARGS
+}
+
+filter_devices_by_prefix() {
+    local input_list="$1"
+    local prefix="$2"
+    local result=""
+
+    # Loop over each element in the input list
+    for element in $input_list; do
+        local device=""
+
+        if [[ "$prefix" == "*" ]]; then
+            # If prefix is *, take the full element
+            device="$element"
+        elif [[ "$element" == "$prefix:"* ]]; then
+            # Otherwise, match elements starting with prefix:
+            device="${element#*:}"
+        fi
+
+        # Add to result if device is non-empty
+        if [[ -n "$device" ]]; then
+            if [[ -z "$result" ]]; then
+                result="$device"
+            else
+                result="$result $device"
+            fi
+        fi
+    done
+
+    echo "$result"
+}
+
+count_elements() {
+    local input_string="$1"
+    local count=0
+    
+    # Handle empty string case
+    if [[ -z "$input_string" ]]; then
+        echo 0
+        return
+    fi
+    
+    # Split the string and count elements
+    for element in $input_string; do
+        ((count++))
+    done
+    
+    echo "$count"
+}
+
+extract_hostnames() {
+    local input_string="$1"
+    local -a result_array=()
+    
+    # Split the input string by spaces and process each element
+    for element in $input_string; do
+        # Extract the hostname part (before the colon)
+        local hostname="${element%%:*}"
+        result_array+=("$hostname")
+    done
+    
+    # Return as space-separated string
+    echo "${result_array[*]}"
+}
+
+
+setup_ib_test_env
+export_envs
+
+declare -A host_map
+CLIENT_HOSTS=($(extract_hostnames "$CLIENTS"))
+SERVER_HOSTS=($(extract_hostnames "$SERVERS"))
+for element in "${CLIENT_HOSTS[@]}"; do
+    host_map["$element"]=1 # The value doesn't matter, only the key's existence
+done
+for element in "${SERVER_HOSTS[@]}"; do
+    host_map["$element"]=1 # The value doesn't matter, only" the key's existence
+done
+HOSTS=("${!host_map[@]}")
+
+if [ "${#HOSTS[@]}" -eq 0 ]; then
+    echo "No hosts to work with, exit"
+    exit 0
+fi
+
+if [ "${#HOSTS[@]}" -eq 1 ] && [ "${HOSTS[0]}" = "$(hostname)" ]; then
+    echo "Running in local mode, execute $(dirname $0)/mtest_perf_local"
+    "$(dirname $0)/mtest_perf_local"
+else
+    echo "Running in MPI mode, hosts: ${HOSTS[@]}"
+    test_cmd="command -v $MPIRUN_CMD"
+    if ! $test_cmd &> /dev/null; then
+        echo "Error: mpirun not found."
+        exit 1
+    fi
+    CMD_HOSTS="${HOSTS[0]}:1"  # Start with first element
+    for ((i=1; i<${#HOSTS[@]}; i++)); do
+        CMD_HOSTS+=",${HOSTS[$i]}:1"
+    done
+    final_cmd="$MPIRUN_CMD --tag-output -H $CMD_HOSTS -np ${#HOSTS[@]} $(mpirun_envs) $(dirname $0)/mtest_perf_local"
+    echo "  $final_cmd"
+    $final_cmd
+fi

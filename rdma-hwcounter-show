@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+[ -z "$1" ] && echo "Usage: $0 <device> [show_all]" && exit 1
+
+DEVICE="$1"
+SHOW_ALL="$2"
+
+# Try different ports if needed
+for port in 1 2; do
+    HW_PATH="/sys/class/infiniband/$DEVICE/ports/$port/hw_counters"
+    if [ -d "$HW_PATH" ]; then
+        for counter in "$HW_PATH"/*; do
+            if [ -f "$counter" ]; then
+                value=$(cat "$counter")
+                if [ -n "$SHOW_ALL" ] || { [ -n "$value" ] && [ "$value" != "0" ]; }; then
+                    echo "$(basename "$counter"): $value"
+                fi
+            fi
+        done
+        exit 0
+    fi
+done
+
+echo "Error: No hw_counters found for device $DEVICE"
+exit 1

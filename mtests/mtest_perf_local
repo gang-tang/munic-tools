@@ -1,0 +1,418 @@
+#!/bin/bash
+set -eo pipefail
+BASE_CORE_INDEX=1
+
+check_numactl() {
+    if ! command -v numactl &> /dev/null; then
+        echo "Error: numactl not found. Please install it with your package manager."
+        exit 1
+    fi
+}
+
+## Function to check for gawk installation
+check_gawk() {
+    # Check if the 'gawk' command exists in the system's PATH
+    if command -v gawk &> /dev/null; then
+        echo "✅ gawk detected."
+    else
+        echo "🚨 ERROR: gawk is required but was not found." >&2
+        echo "Please install gawk on this system (e.g., sudo apt install gawk or sudo yum install gawk)." >&2
+        exit 1
+    fi
+}
+
+filter_devices_by_prefix() {
+    local input_list="$1"
+    local prefix="$2"
+    local result=""
+
+    # Loop over each element in the input list
+    for element in $input_list; do
+        local device=""
+
+        if [[ "$prefix" == "*" ]]; then
+            # If prefix is *, take the full element
+            device="$element"
+        elif [[ "$element" == "$prefix:"* ]]; then
+            # Otherwise, match elements starting with prefix:
+            device="${element#*:}"
+        fi
+
+        # Add to result if device is non-empty
+        if [[ -n "$device" ]]; then
+            if [[ -z "$result" ]]; then
+                result="$device"
+            else
+                result="$result $device"
+            fi
+        fi
+    done
+
+    echo "$result"
+}
+
+count_elements() {
+    local input_string="$1"
+    local count=0
+    
+    # Handle empty string case
+    if [[ -z "$input_string" ]]; then
+        echo 0
+        return
+    fi
+    
+    # Split the string and count elements
+    for element in $input_string; do
+        ((count++))
+    done
+    
+    echo "$count"
+}
+
+generate_number_sequence() {
+    local base="$1"
+    local count="$2"
+    local result=""
+    
+    for ((i=0; i<count; i++)); do
+        local num=$((base + i))
+        if [[ -z "$result" ]]; then
+            result="$num"
+        else
+            result="$result $num"
+        fi
+    done
+    
+    echo "$result"
+}
+
+select_by_host_filter() {
+    local filter_array=($1)    # Convert to array: "dev1:1 dev1:2..." -> ["dev1:1", "dev1:2", ...]
+    local value_array=($2)     # Convert to array: "20000 20001..." -> ["20000", "20001", ...]
+    local target_host="$3"
+    local result=""
+    
+    # Iterate through all indices of filter_array
+    for i in "${!filter_array[@]}"; do
+        if [[ "${filter_array[i]}" == "$target_host:"* ]]; then
+            # Add corresponding value from value_array to result
+            if [[ -z "$result" ]]; then
+                result="${value_array[i]}"
+            else
+                result="$result ${value_array[i]}"
+            fi
+        fi
+    done
+    
+    echo "$result"
+}
+
+extract_hostnames() {
+    local input_string="$1"
+    local -a result_array=()
+    
+    # Split the input string by spaces and process each element
+    for element in $input_string; do
+        # Extract the hostname part (before the colon)
+        local hostname="${element%%:*}"
+        result_array+=("$hostname")
+    done
+    
+    # Return as space-separated string
+    echo "${result_array[*]}"
+}
+
+get_numa_node() {
+    local dev=$1
+    local node_file="/sys/class/infiniband/${dev}/device/numa_node"
+    if [[ -f "$node_file" ]]; then
+        cat "$node_file"
+    else
+	echo "No unma_node found for $dev"
+	exit 1
+    fi
+}
+
+generate_file_id() {
+    local file_id=$(date +"%Y%m%d_%H%M%S")
+    echo "$file_id"
+}
+
+declare -A USED_CPUS
+
+get_next_ordered_numa_cpu() {
+    local node_id=$1
+    if [[ -z "$node_id" ]]; then
+        echo "Usage: get_next_ordered_numa_cpu <node_id>" >&2
+        return 1
+    fi
+
+    local node_path="/sys/devices/system/node/node${node_id}"
+    if [[ ! -d "$node_path" ]]; then
+        echo "Error: NUMA node ${node_id} not found" >&2
+        return 1
+    fi
+
+    # Get online CPUs for the NUMA node
+    local online_cpus_raw
+    online_cpus_raw=$(cat "$node_path/cpulist")
+
+    # Expand ranges like 0-3,5-6 into a flat list
+    local cpu_list=()
+    IFS=',' read -ra parts <<< "$online_cpus_raw"
+    for part in "${parts[@]}"; do
+        if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            for ((i=${BASH_REMATCH[1]}; i<=${BASH_REMATCH[2]}; i++)); do
+                cpu_list+=("$i")
+            done
+        else
+            cpu_list+=("$part")
+        fi
+    done
+
+    # Get already used CPUs for this node
+    local used=${USED_CPUS[$node_id]:-}
+
+    # Find first CPU not yet used
+    for cpu in "${cpu_list[@]}"; do
+        if ! [[ " $used " =~ " $cpu " ]]; then
+            # mark CPU as used
+            USED_CPUS[$node_id]="$used $cpu"
+            echo "$cpu"
+            return 0
+        fi
+    done
+
+    echo "Error: All CPUs on NUMA node $node_id are used" >&2
+    return 1
+}
+
+get_numa_cpu ()
+{
+    local numa_node=$1
+    local base_dir="/tmp/mtest_perf"
+    mkdir -p "$base_dir"
+    local state_file="$base_dir/numa_state_node_${numa_node}.txt"
+    local lock_file="$base_dir/numa_lock_node_${numa_node}.lock"
+
+    # Use a subshell to wrap the logic inside a lock
+    (
+        # Request an exclusive lock on the lock file (file descriptor 200)
+        flock -x 200
+
+        local cpus=""
+
+        # 1. Initialize file if it doesn't exist
+        if [[ ! -f "$state_file" ]]; then
+            # Extract online primary cores for the specific NUMA node
+            # cpus=$(lscpu -p=CPU,NODE,CORE | grep -v '^#' | grep -E "^[0-9]+,${numa_node}," | sort -u -t, -k3,3 | cut -d',' -f1 | paste -sd "," -)
+            cpus=$(lscpu -p=CPU,NODE,CORE | grep -v '^#' | grep -E "^[0-9]+,${numa_node}," | sort -t, -k3,3n -u | cut -d',' -f1 | sort -n | paste -sd "," -)
+
+            if [[ -z "$cpus" ]]; then
+                echo "Error: No CPUs found for NUMA node $numa_node" >&2
+                exit 1
+            fi
+
+	    # Convert to array
+	    IFS=',' read -r -a cpu_array <<< "$cpus"
+	    # Index-based slicing
+            if (( BASE_CORE_INDEX >= ${#cpu_array[@]} )); then
+                echo "Error: BASE_CORE_INDEX ($BASE_CORE_INDEX) exceeds CPU list size (${#cpu_array[@]})" >&2
+                exit 1
+            fi
+        
+            sliced_cpus=("${cpu_array[@]:BASE_CORE_INDEX}")
+        
+            # Join back to comma-separated list
+            cpus=$(IFS=,; echo "${sliced_cpus[*]}")
+            echo "$cpus" > "$state_file"
+            echo 0 >> "$state_file"
+        fi
+
+        # 2. Load state
+        mapfile -t lines < "$state_file"
+        local cpu_list_str="${lines[0]}"
+        local current_index="${lines[1]}"
+
+        # 3. Parse and calculate
+        IFS=',' read -r -a cpu_array <<< "$cpu_list_str"
+        local total_cpus=${#cpu_array[@]}
+        local allocated_cpu=${cpu_array[$current_index]}
+        local next_index=$(( ( current_index + 1) % total_cpus))
+
+        # 4. Update file
+        echo "$cpu_list_str" > "$state_file"
+        echo "$next_index" >> "$state_file"
+
+        # 5. Output the result
+        echo "$allocated_cpu"
+
+    ) 200>"$lock_file"
+}
+
+PIDS=()
+
+cleanup() {
+    # Only proceed if the cleanup hasn't run yet (optional but safer)
+    if [ "$CLEANUP_DONE" = "true" ]; then
+        return
+    fi
+    CLEANUP_DONE="true" # Set flag
+
+    echo
+    echo "Cleaning up... killing all perftest processes."
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "killing $pid"
+            # IMPORTANT: kill the process GROUP
+            #kill -- -9 -"$pid" 2>/dev/null || true
+	        kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+    if [[ -n "${tail_pid:-}" ]] && kill -0 "$tail_pid" 2>/dev/null; then
+        echo "killing tail $tail_pid"
+        kill -TERM "$tail_pid" 2>/dev/null || true
+    fi
+    echo "Killing has been sent, waiting."
+    wait 2>/dev/null || true
+    echo "All background processes terminated."
+    # Crucial Fix: Unset the EXIT trap to prevent re-execution upon exit
+    trap - EXIT 2>/dev/null
+}
+
+trap cleanup EXIT INT TERM
+
+
+check_numactl
+check_gawk
+NUM=$(count_elements "$CLIENTS")
+EXECUTE_ID=$(generate_file_id)
+LOG_FILE=""
+CLIENT_NICS=($(filter_devices_by_prefix "$CLIENTS" "$(hostname)"))
+SERVER_NICS=($(filter_devices_by_prefix "$SERVERS" "$(hostname)"))
+TCP_PORTS=$(generate_number_sequence "$BASE_PORT" "$NUM")
+CLIENT_PORTS=($(select_by_host_filter "$CLIENTS" "$TCP_PORTS" "$(hostname)"))
+SERVER_PORTS=($(select_by_host_filter "$SERVERS" "$TCP_PORTS" "$(hostname)"))
+DST_IPS=$(extract_hostnames "$SERVERS")
+DST_DEVS=($(filter_devices_by_prefix "$SERVERS" "*"))
+CLIENT_DST_IPS=($(select_by_host_filter "$CLIENTS" "$DST_IPS" "$(hostname)"))
+CLIENT_DST_DEVS=($(select_by_host_filter "$CLIENTS" "${DST_DEVS[*]}" "$(hostname)"))
+
+echo "Host $(hostname)" configuration
+echo "  CLIENT_NICS:        ${CLIENT_NICS[*]}"
+echo "  CLIENT_PORTS:       ${CLIENT_PORTS[*]}"
+echo "  CLIENT_DST_IPS:     ${CLIENT_DST_IPS[*]}"
+echo "  CLIENT_DST_DEVS:    ${CLIENT_DST_DEVS[*]}"
+echo "  SERVER_NICS:        ${SERVER_NICS[*]}"
+echo "  SERVER_PORTS:       ${SERVER_PORTS[*]}"
+echo "  QP_NUM:             $QP_NUM"
+echo "  MESSAGE_SIZE:       $MESSAGE_SIZE"
+echo "  TC_CLASS:           $TC_CLASS"
+echo "  RUN_ID:             $RUN_ID"
+echo "  ENABLE_BIND_CORE:   $ENABLE_BIND_CORE"
+echo "  ENABLE_EXPORT:      $ENABLE_EXPORT"
+mkdir -p ".mtests"
+# Start servers
+for i in "${!SERVER_NICS[@]}"; do
+    DEVC="${SERVER_NICS[$i]}"
+    DEV="${DEVC%%:*}"
+    CUDADEV=""
+    [[ "$DEVC" == *:* ]] && CUDADEV="${DEVC##*:}"
+    PORT="${SERVER_PORTS[$i]}"
+    NODE=$(get_numa_node "$DEV")
+    CORE="any"
+    TASKSET=""
+    if [[ -n "$ENABLE_BIND_CORE" ]]; then
+        CORE=$(get_numa_cpu "$NODE")
+        TASKSET="taskset -c $CORE"
+    fi
+    echo "  ▶ Server $(hostname):$DEV (port $PORT, NUMA node $NODE, core $CORE, cuda: $CUDADEV)"
+    if [[ -n "$CUDADEV" ]]; then
+        numactl --cpunodebind=$NODE --membind=$NODE \
+            $TASKSET \
+            $PERFTEST_CMD -d "$DEV" -F -p "$PORT" -s "${MESSAGE_SIZE}" \
+            -q "${QP_NUM}" --tclass="${TC_CLASS}" \
+            --use_cuda="$CUDADEV" --use_cuda_dmabuf \
+            ${RUN_ID:+ --run_id ${RUN_ID}} ${ENABLE_EXPORT:+ --munic_export} > ".mtests/server_${DEV}_${PORT}.${EXECUTE_ID}.log" 2>&1 &
+    else
+        numactl --cpunodebind=$NODE --membind=$NODE \
+            $TASKSET \
+            $PERFTEST_CMD -d "$DEV" -F -p "$PORT" -s "${MESSAGE_SIZE}" \
+            -q "${QP_NUM}" --tclass="${TC_CLASS}" \
+            ${RUN_ID:+ --run_id ${RUN_ID}} ${ENABLE_EXPORT:+ --munic_export} > ".mtests/server_${DEV}_${PORT}.${EXECUTE_ID}.log" 2>&1 &
+    fi
+    PIDS+=($!)
+    #sleep 0.3
+done
+
+sleep 5  # wait for servers to initialize
+
+# Start clients (connect each NIC to the next)
+for i in "${!CLIENT_NICS[@]}"; do
+    LOG_FILE=".mtests/clients.${QP_NUM}.${MESSAGE_SIZE}.${EXECUTE_ID}.log"
+    SRC_DEV="${CLIENT_NICS[$i]}"
+    DEV="${SRC_DEV%%:*}"
+    CUDADEV=""
+    [[ "$SRC_DEV" == *:* ]] && CUDADEV="${SRC_DEV##*:}"
+    DST_IP="${CLIENT_DST_IPS[$i]}"
+    DST_DEV="${CLIENT_DST_DEVS[$i]}"
+    PORT="${CLIENT_PORTS[$i]}"
+    NODE=$(get_numa_node "$DEV")
+    CORE="any"
+    TASKSET=""
+    if [[ -n "$ENABLE_BIND_CORE" ]]; then
+        CORE=$(get_numa_cpu "$NODE")
+        TASKSET="taskset -c $CORE"
+    fi
+    LOG_PREFIX="[$(hostname):$SRC_DEV → $DST_DEV] "
+    echo "  ▶ Client: $(hostname):$SRC_DEV → $DST_DEV (NUMA node $NODE, core $CORE)"
+    if [[ -n "$CUDADEV" ]]; then
+        numactl --cpunodebind="$NODE" --membind="$NODE" \
+            $TASKSET \
+            $PERFTEST_CMD -d "$DEV" -F -p "$PORT" "$DST_IP" \
+                -s "$MESSAGE_SIZE" -q "$QP_NUM" --tclass="$TC_CLASS" \
+                --use_cuda="$CUDADEV" --use_cuda_dmabuf \
+                ${RUN_ID:+ --run_id ${RUN_ID}} ${ENABLE_EXPORT:+ --munic_export} \
+            > >(awk -v p="$LOG_PREFIX" '{print p $0; fflush()}' >> "$LOG_FILE") \
+            2>&1 &
+    else
+        numactl --cpunodebind="$NODE" --membind="$NODE" \
+            $TASKSET \
+            $PERFTEST_CMD -d "$DEV" -F -p "$PORT" "$DST_IP" \
+                -s "$MESSAGE_SIZE" -q "$QP_NUM" --tclass="$TC_CLASS" \
+                ${RUN_ID:+ --run_id ${RUN_ID}} ${ENABLE_EXPORT:+ --munic_export} \
+            > >(awk -v p="$LOG_PREFIX" '{print p $0; fflush()}' >> "$LOG_FILE") \
+            2>&1 &
+    fi
+    PIDS+=($!)
+    #sleep 0.3
+done
+sleep 3
+echo "All perftest pairs launched."
+# Wait for all log files to be created
+if [ ! -z "$LOG_FILE" ]; then
+    echo "Waiting for log file to be created..."
+    while [[ ! -f "$LOG_FILE" ]]; do
+        sleep 0.1   
+    done
+    echo "  ✓ $LOG_FILE created"
+    tail -f "$LOG_FILE" &
+    tail_pid=$!
+    while true; do
+        alive=0
+        for pid in "${PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                alive=1
+                break
+            fi
+        done
+    
+        if (( !alive )); then
+            echo "All perftests finished."
+            kill "$tail_pid" 2>/dev/null || true
+            break
+        fi
+    done
+fi
+wait
+

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+# Show RDMA link info with appended IP address of the associated netdev
+# Requires: rdma, ip
+
+while IFS= read -r line; do
+    # Extract netdev name: "netdev eth0"
+    netdev=$(echo "$line" | sed -n 's/.*netdev \([a-zA-Z0-9_.-]*\).*/\1/p')
+    rdmadev=$(echo "$line" | cut -d' ' -f2 | cut -d'/' -f1)
+
+    if [[ -n "$netdev" ]]; then
+        # Get primary IPv4 address (or "-" if none)
+        ipaddr=$(ip -4 addr show "$netdev" | awk '/inet / {print $2; exit}')
+
+        if [[ -z "$ipaddr" ]]; then
+            ipaddr="-"  # no IPv4 found
+        fi
+	echo "setting dcb app add dscp-prio on ${rdmadev}:${netdev}:${ipaddr} $@"
+	sudo dcb app add dev "$netdev" dscp-prio "$@"
+	echo ""
+    fi
+
+done < <(rdma link)

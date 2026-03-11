@@ -1,0 +1,65 @@
+#!/bin/bash
+
+VENDOR_ID="8848"
+EXPECTED_SPEED="32GT/s"
+EXPECTED_WIDTH="x16"
+
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+NC="\033[0m"
+
+TOTAL=0
+FAILED=0
+
+echo "Checking PCIe devices with vendor ID ${VENDOR_ID}..."
+echo
+
+DEVICES=$(lspci -Dn | awk -v vid="$VENDOR_ID" '$3 ~ vid {print $1}')
+
+if [ -z "$DEVICES" ]; then
+    echo -e "${YELLOW}No devices found with vendor ID ${VENDOR_ID}.${NC}"
+    exit 0
+fi
+
+for dev in $DEVICES; do
+    TOTAL=$((TOTAL+1))
+    echo "Device: $dev"
+
+    LNKSTA=$(sudo lspci -s $dev -vv | grep -i "LnkSta:")
+
+    if [ -z "$LNKSTA" ]; then
+        echo -e "  ${RED}Unable to read PCIe link status.${NC}"
+        FAILED=$((FAILED+1))
+        echo
+        continue
+    fi
+
+    # Extract clean values (no "(ok)" text)
+    SPEED=$(echo "$LNKSTA" | grep -oP 'Speed \K[0-9.]+GT/s')
+    WIDTH=$(echo "$LNKSTA" | grep -oP 'Width \Kx[0-9]+')
+
+    echo "  Current Speed : $SPEED"
+    echo "  Current Width : $WIDTH"
+
+    if [[ "$SPEED" == "$EXPECTED_SPEED" && "$WIDTH" == "$EXPECTED_WIDTH" ]]; then
+        echo -e "  ${GREEN}OK: Running at PCIe Gen5 x16${NC}"
+    else
+        echo -e "  ${RED}WARNING: Not running at Gen5 x16!${NC}"
+        FAILED=$((FAILED+1))
+    fi
+
+    echo
+done
+
+echo "======================================="
+echo "Summary:"
+echo "  Total Devices Checked : $TOTAL"
+
+if [ "$FAILED" -eq 0 ]; then
+    echo -e "  ${GREEN}All devices are running at Gen5 x16.${NC}"
+    exit 0
+else
+    echo -e "  ${RED}Devices NOT at Gen5 x16 : $FAILED${NC}"
+    exit 1
+fi
