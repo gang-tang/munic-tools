@@ -11,6 +11,8 @@ CMD_TC_CLASS=""
 CMD_RUN_ID=""
 CMD_ENABLE_BIND_CORE=""
 CMD_ENABLE_EXPORT=""
+CMD_CLIENTS=""
+CMD_SERVERS=""
 
 # Default application name for usage message
 APP_NAME=$(basename "$0")
@@ -21,7 +23,7 @@ APP_NAME=$(basename "$0")
 
 # Function to display usage information
 usage() {
-    echo "Usage: $APP_NAME -c <config_file> [-q <qp_count>] [-m <msg_size>] [-t <traffic_class>] [-b] [-e]"
+    echo "Usage: $APP_NAME -c <config_file> [-q <qp_count>] [-m <msg_size>] [-t <traffic_class>] [-b] [-e] [-C <clients>] [-S <servers>]"
     echo ""
     echo "Options:"
     echo "  -c <config_file>    Specify the path to the configuration file (REQUIRED)."
@@ -31,13 +33,15 @@ usage() {
     echo "  -t <traffic_class>  Specify the traffic class (optional)."
     echo "  -b                  Bind process to CPU core."
     echo "  -e                  Export the records."
+    echo "  -C <clients>        Override CLIENTS configuration string (optional)."
+    echo "  -S <servers>        Override SERVERS configuration string (optional)."
     echo ""
     exit 1
 }
 
 # --- Argument Parsing using getopts ---
-# 'c:', 'q:', 'm:', 't:' all expect an argument.
-while getopts ":c:q:m:t:r:be" opt; do
+# 'c:', 'q:', 'm:', 't:', 'r:', 'C:', 'S:' all expect an argument.
+while getopts ":c:q:m:t:r:beC:S:" opt; do
     case $opt in
         c)
             CONFIG_FILE="$OPTARG"
@@ -59,6 +63,12 @@ while getopts ":c:q:m:t:r:be" opt; do
             ;;
         e)
             CMD_ENABLE_EXPORT=1
+            ;;
+        C)
+            CMD_CLIENTS="$OPTARG"
+            ;;
+        S)
+            CMD_SERVERS="$OPTARG"
             ;;
         \?)
             echo "Error: Invalid option: -$OPTARG" >&2
@@ -94,8 +104,17 @@ echo "Configuration file found. Loading defaults from: $CONFIG_FILE"
 source "$CONFIG_FILE"
 
 # --- Command Line Override Logic ---
-# The variables set by the config file (QP_NUM, MESSAGE_SIZE, TC_CLASS, RUN_ID) are now overridden
-# if a value was supplied via the command line arguments (-q, -m, -t).
+# Override variables set by the config file if a value was supplied via CLI.
+
+if [ -n "$CMD_CLIENTS" ]; then
+    CLIENTS="$CMD_CLIENTS"
+    echo "NOTICE: CLIENTS overridden by -C to: $CLIENTS"
+fi
+
+if [ -n "$CMD_SERVERS" ]; then
+    SERVERS="$CMD_SERVERS"
+    echo "NOTICE: SERVERS overridden by -S to: $SERVERS"
+fi
 
 # Override QP_NUM if -q was provided
 if [ -n "$CMD_QP_NUM" ]; then
@@ -111,7 +130,7 @@ if [ -n "$CMD_ENABLE_EXPORT" ]; then
     ENABLE_EXPORT="$CMD_ENABLE_EXPORT"
 fi
 
-# Override QP_NUM if -q was provided
+# Override RUN_ID if -r was provided
 if [ -n "$CMD_RUN_ID" ]; then
     RUN_ID="$CMD_RUN_ID"
 fi
@@ -147,15 +166,15 @@ setup_ib_test_env() {
     PERFTEST_CMD="${PERFTEST_CMD:-ib_write_bw}"
 
     MPIRUN_CMD="${MPIRUN_CMD:-mpirun}"
-    
+
     BASE_PORT="${BASE_PORT:-20000}"
-    
+
     QP_NUM="${QP_NUM:-1}"
-    
+
     MESSAGE_SIZE="${MESSAGE_SIZE:-4096}"
-    
+
     TC_CLASS="${TC_CLASS:-0}"
-    
+
     # Print the configuration for verification
     echo "Munic Test Perf Configuration:"
     echo "  MPIRUN_CMD:         $MPIRUN_CMD"
@@ -171,6 +190,7 @@ setup_ib_test_env() {
     echo "  ENABLE_BIND_CORE:   $ENABLE_BIND_CORE"
     echo "  ENABLE_EXPORT:      $ENABLE_EXPORT"
 }
+
 # Use CFG_LD_LIBRARY_PATH to avoid conflict with local LD_LIBRARY_PATH
 export_envs () {
     export PERFTEST_CMD
@@ -233,32 +253,32 @@ filter_devices_by_prefix() {
 count_elements() {
     local input_string="$1"
     local count=0
-    
+
     # Handle empty string case
     if [[ -z "$input_string" ]]; then
         echo 0
         return
     fi
-    
+
     # Split the string and count elements
     for element in $input_string; do
         ((count++))
     done
-    
+
     echo "$count"
 }
 
 extract_hostnames() {
     local input_string="$1"
     local -a result_array=()
-    
+
     # Split the input string by spaces and process each element
     for element in $input_string; do
         # Extract the hostname part (before the colon)
         local hostname="${element%%:*}"
         result_array+=("$hostname")
     done
-    
+
     # Return as space-separated string
     echo "${result_array[*]}"
 }
@@ -274,7 +294,7 @@ for element in "${CLIENT_HOSTS[@]}"; do
     host_map["$element"]=1 # The value doesn't matter, only the key's existence
 done
 for element in "${SERVER_HOSTS[@]}"; do
-    host_map["$element"]=1 # The value doesn't matter, only" the key's existence
+    host_map["$element"]=1 # The value doesn't matter, only the key's existence
 done
 HOSTS=("${!host_map[@]}")
 
@@ -285,7 +305,7 @@ fi
 
 if [ "${#HOSTS[@]}" -eq 1 ] && [ "${HOSTS[0]}" = "$(hostname)" ]; then
     echo "Running in local mode, execute $(dirname $0)/mtest_perf_local"
-    "$(dirname $0)/mtest_perf_local"
+    $(dirname $0)/mtest_perf_local
 else
     echo "Running in MPI mode, hosts: ${HOSTS[@]}"
     test_cmd="command -v $MPIRUN_CMD"
