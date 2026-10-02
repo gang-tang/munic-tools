@@ -1,0 +1,173 @@
+normalize_pfc() {
+    local raw="$1"
+    printf '%s\n' "$raw" | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "prio-pfc") {
+                    valid = 1
+                    for (j = i + 1; j <= NF; j++) {
+                        if ($j !~ /^[0-7]:(on|off)$/ || seen[substr($j, 1, 1)]++) {
+                            valid = 0
+                            continue
+                        }
+                        priority = substr($j, 1, 1)
+                        sub(/^[0-7]:/, "", $j)
+                        values[priority] = $j
+                        count++
+                    }
+                    if (valid && count == 8) {
+                        for (priority = 0; priority <= 7; priority++) {
+                            if (!(priority in values)) exit
+                            printf "%s%d:%s", (priority ? "," : ""), priority, values[priority]
+                        }
+                        print ""
+                    }
+                    exit
+                }
+            }
+        }
+    '
+}
+
+normalize_buffer() {
+    local raw="$1"
+    printf '%s\n' "$raw" | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "buffer-size") {
+                    valid = 1
+                    for (j = i + 1; j <= NF; j++) {
+                        if ($j !~ /^[0-7]:[0-9]+b?$/ || seen[substr($j, 1, 1)]++) {
+                            valid = 0
+                            continue
+                        }
+                        priority = substr($j, 1, 1)
+                        sub(/b$/, "", $j)
+                        sub(/^[0-7]:/, "", $j)
+                        values[priority] = $j
+                        count++
+                    }
+                    if (valid && count == 8) {
+                        for (priority = 0; priority <= 7; priority++) {
+                            if (!(priority in values)) exit
+                            printf "%s%d:%s", (priority ? "," : ""), priority, values[priority]
+                        }
+                        print ""
+                    }
+                    exit
+                }
+            }
+        }
+    '
+}
+
+check_rdma_link_settings() {
+    (( ${#DEV_LINKS[@]} > 1 )) || return 0
+
+    local field_name dev value majority_value majority_count cur read_status
+    local -a valid_devs unavailable command_failed field_missing parse_failed deviators report
+    local -A count_by_value
+    local has_issue=0
+
+    for field_name in mtu pfc buffer; do
+        count_by_value=()
+        valid_devs=()
+        unavailable=()
+        command_failed=()
+        field_missing=()
+        parse_failed=()
+        for dev in "${DEV_LINKS[@]}"; do
+            case "$field_name" in
+                mtu) value="${DEV_MTU[$dev]}" ;;
+                pfc)
+                    value="${DEV_PFC[$dev]}"
+                    read_status="${DEV_PFC_STATUS[$dev]}"
+                    ;;
+                buffer)
+                    value="${DEV_BUFFER[$dev]}"
+                    read_status="${DEV_BUFFER_STATUS[$dev]}"
+                    ;;
+            esac
+
+            if [[ "$field_name" == mtu ]]; then
+                read_status="readable"
+                [[ "$value" == "unknown" || -z "$value" ]] && read_status="unavailable"
+            fi
+            if [[ "$read_status" == "command-failed" ]]; then
+                command_failed+=("$dev (${DEV_NETDEV[$dev]})")
+                continue
+            elif [[ "$read_status" == "field-missing" ]]; then
+                field_missing+=("$dev (${DEV_NETDEV[$dev]})")
+                continue
+            elif [[ "$read_status" == "parse-failed" ]]; then
+                parse_failed+=("$dev (${DEV_NETDEV[$dev]})")
+                continue
+            elif [[ "$read_status" != "readable" || -z "$value" || "$value" == "unknown" ]]; then
+                unavailable+=("$dev (${DEV_NETDEV[$dev]})")
+                continue
+            fi
+            valid_devs+=("$dev")
+            count_by_value["$value"]=$(( ${count_by_value["$value"]:-0} + 1 ))
+        done
+
+        if (( ${#unavailable[@]} > 0 )); then
+            report+=("  - $field_name: unable to read for ${unavailable[*]}")
+            has_issue=1
+        fi
+        if (( ${#command_failed[@]} > 0 )); then
+            report+=("  - $field_name: command failed for ${command_failed[*]}")
+            has_issue=1
+        fi
+        if (( ${#field_missing[@]} > 0 )); then
+            report+=("  - $field_name: field missing from successful command output for ${field_missing[*]}")
+            has_issue=1
+        fi
+        if (( ${#parse_failed[@]} > 0 )); then
+            report+=("  - $field_name: unable to parse output for ${parse_failed[*]}")
+            has_issue=1
+        fi
+
+        majority_value=""
+        majority_count=0
+        for value in "${!count_by_value[@]}"; do
+            if (( count_by_value["$value"] > majority_count )); then
+                majority_value="$value"
+                majority_count=${count_by_value["$value"]}
+            fi
+        done
+
+        if (( ${#valid_devs[@]} == 0 || majority_count * 2 <= ${#DEV_LINKS[@]} )); then
+            report+=("  - $field_name: no strict majority; values are inconsistent or incomplete")
+            has_issue=1
+            continue
+        fi
+
+        deviators=()
+        for dev in "${valid_devs[@]}"; do
+            case "$field_name" in
+                mtu) cur="${DEV_MTU[$dev]}" ;;
+                pfc) cur="${DEV_PFC[$dev]}" ;;
+                buffer) cur="${DEV_BUFFER[$dev]}" ;;
+            esac
+            if [[ "$cur" != "$majority_value" ]]; then
+                deviators+=("$dev (${DEV_NETDEV[$dev]})")
+            fi
+        done
+
+        if (( ${#deviators[@]} > 0 )); then
+            if (( ${#unavailable[@]} > 0 || ${#parse_failed[@]} > 0 )); then
+                report+=("  - $field_name: majority among readable links=$majority_value; deviating links: ${deviators[*]}")
+            else
+                report+=("  - $field_name: majority=$majority_value; deviating links: ${deviators[*]}")
+            fi
+            has_issue=1
+        fi
+    done
+
+    if (( has_issue )); then
+        echo "WARNING: RDMA link settings are inconsistent or incomplete."
+        printf '%s\n' "${report[@]}"
+        return 1
+    fi
+    return 0
+}

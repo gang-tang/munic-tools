@@ -3,9 +3,22 @@
 # Show RDMA link info with appended IP address of the associated netdev
 # Requires: rdma, ip
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$SCRIPT_DIR/rdma-link-check"
+
+DEV_LINKS=()
+declare -A DEV_SEEN=()
+declare -A DEV_NETDEV=()
+declare -A DEV_MTU=()
+declare -A DEV_PFC=()
+declare -A DEV_BUFFER=()
+declare -A DEV_PFC_STATUS=()
+declare -A DEV_BUFFER_STATUS=()
+
 while IFS= read -r line; do
     # Extract netdev name: "netdev eth0"
     netdev=$(echo "$line" | sed -n 's/.*netdev \([a-zA-Z0-9_.-]*\).*/\1/p')
+    rdma_link=$(echo "$line" | sed -n 's/.*link \([^[:space:]]*\).*/\1/p')
 
     if [[ -n "$netdev" ]]; then
         # Get primary IPv4 address (or "-" if none)
@@ -14,26 +27,88 @@ while IFS= read -r line; do
         if [[ -z "$ipaddr" ]]; then
             ipaddr="-"  # no IPv4 found
         fi
-	mtu=$(ip link show "$netdev" | grep -oP 'mtu \K[0-9]+')
-    
-    mac_address=$(ip link show dev "$netdev" 2>/dev/null | grep -oP 'link/ether \K[0-9a-f:]+' | head -1)
-    ETHTOOL_OUTPUT=$(ethtool -i "$netdev" 2>/dev/null)
-    # Extract firmware-version using grep and sed
-    FIRMWARE_VERSION=$(echo "$ETHTOOL_OUTPUT" | grep -i "firmware-version:" | sed 's/firmware-version://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
+        mtu=$(ip link show "$netdev" 2>/dev/null | grep -oP 'mtu \K[0-9]+' || echo "unknown")
 
-    # Extract version using grep and sed
-    VERSION=$(echo "$ETHTOOL_OUTPUT" | grep -i "^version:" | sed 's/version://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
-    
-    # Extract bus-info using grep and sed
-    BUS_INFO=$(echo "$ETHTOOL_OUTPUT" | grep -i "bus-info:" | sed 's/bus-info://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
-    echo "$line ip $ipaddr mtu $mtu"
-    # Display the extracted information
-    echo "mac $mac_address bus $BUS_INFO firmware $FIRMWARE_VERSION driver $VERSION"
-	dcb pfc show dev "$netdev"
-	dcb app show dev "$netdev"
-	echo ""
+        mac_address=$(ip link show dev "$netdev" 2>/dev/null | grep -oP 'link/ether \K[0-9a-f:]+' | head -1)
+        ETHTOOL_OUTPUT=$(ethtool -i "$netdev" 2>/dev/null)
+        # Extract firmware-version using grep and sed
+        FIRMWARE_VERSION=$(echo "$ETHTOOL_OUTPUT" | grep -i "firmware-version:" | sed 's/firmware-version://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
+
+        # Extract version using grep and sed
+        VERSION=$(echo "$ETHTOOL_OUTPUT" | grep -i "^version:" | sed 's/version://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
+
+        # Extract bus-info using grep and sed
+        BUS_INFO=$(echo "$ETHTOOL_OUTPUT" | grep -i "bus-info:" | sed 's/bus-info://i; s/^[[:space:]]*//; s/[[:space:]]*$//')
+
+        PFC_OUTPUT=$(dcb pfc show dev "$netdev" 2>/dev/null)
+        PFC_STATUS=$?
+        BUFFER_OUTPUT=$(dcb buff show dev "$netdev" 2>/dev/null)
+        BUFFER_STATUS=$?
+        PFC_RAW=$(printf '%s\n' "$PFC_OUTPUT" | awk '/prio-pfc/ {print; exit}')
+        BUFFER_RAW=$(printf '%s\n' "$BUFFER_OUTPUT" | awk '/buffer-size/ {print; exit}')
+        PFC_VALUE=""
+        BUFFER_VALUE=""
+        PFC_READ_STATUS="command-failed"
+        BUFFER_READ_STATUS="command-failed"
+        if (( PFC_STATUS == 0 )); then
+            if [[ "$PFC_OUTPUT" != *prio-pfc* ]]; then
+                PFC_READ_STATUS="field-missing"
+            else
+                PFC_VALUE=$(normalize_pfc "$PFC_RAW")
+                if [[ -n "$PFC_VALUE" ]]; then
+                    PFC_READ_STATUS="readable"
+                else
+                    PFC_READ_STATUS="parse-failed"
+                fi
+            fi
+        fi
+        if (( BUFFER_STATUS == 0 )); then
+            if [[ "$BUFFER_OUTPUT" != *buffer-size* ]]; then
+                BUFFER_READ_STATUS="field-missing"
+            else
+                BUFFER_VALUE=$(normalize_buffer "$BUFFER_RAW")
+                if [[ -n "$BUFFER_VALUE" ]]; then
+                    BUFFER_READ_STATUS="readable"
+                else
+                    BUFFER_READ_STATUS="parse-failed"
+                fi
+            fi
+        fi
+
+        if [[ -n "$rdma_link" && -z ${DEV_SEEN["$rdma_link"]+present} ]]; then
+            DEV_LINKS+=("$rdma_link")
+            DEV_SEEN["$rdma_link"]=1
+            DEV_NETDEV["$rdma_link"]="$netdev"
+            DEV_MTU["$rdma_link"]="$mtu"
+            DEV_PFC["$rdma_link"]="$PFC_VALUE"
+            DEV_BUFFER["$rdma_link"]="$BUFFER_VALUE"
+            DEV_PFC_STATUS["$rdma_link"]="$PFC_READ_STATUS"
+            DEV_BUFFER_STATUS["$rdma_link"]="$BUFFER_READ_STATUS"
+        fi
+
+        echo "$line ip $ipaddr mtu $mtu"
+        # Display the extracted information
+        echo "mac $mac_address bus $BUS_INFO firmware $FIRMWARE_VERSION driver $VERSION"
+        if (( PFC_STATUS != 0 )); then
+            echo "dcb pfc command failed for $netdev"
+        elif [[ -z "$PFC_OUTPUT" ]]; then
+            echo "dcb pfc returned no output for $netdev"
+        else
+            printf '%s\n' "$PFC_OUTPUT"
+        fi
+        if (( BUFFER_STATUS != 0 )); then
+            echo "dcb buff command failed for $netdev"
+        elif [[ -z "$BUFFER_OUTPUT" ]]; then
+            echo "dcb buff returned no output for $netdev"
+        else
+            printf '%s\n' "$BUFFER_OUTPUT"
+        fi
+        dcb app show dev "$netdev"
+        echo ""
     else
         echo "$line ip -"
     fi
 
 done < <(rdma link)
+
+check_rdma_link_settings
