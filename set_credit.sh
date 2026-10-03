@@ -7,7 +7,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-DBG_PCI=/home/munic/hihan/sw/sw-driver/tools/dbg-pci/dbg-pci
+DBG_PCI=/home/munic/mucse/sw/sw-driver/tools/dbg-pci/dbg-pci
 
 case "${1:-disable}" in
     disable)
