@@ -15,7 +15,7 @@ count=0
 success=0
 
 # 查找并处理设备
-lspci -D -d 8848:8260 2>/dev/null | awk '{print $1}' | while read bdf; do
+lspci -D -d 8848:8620 2>/dev/null | awk '{print $1}' | while read bdf; do
     if [ -n "$bdf" ]; then
         count=$((count + 1))
         echo ""

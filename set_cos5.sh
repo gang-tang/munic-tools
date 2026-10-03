@@ -62,7 +62,7 @@ while IFS= read -r bdf; do
     else
         echo "  Status: failed"
     fi
-done < <(lspci -D -d 8848:8260 2>/dev/null | awk '{print $1}')
+done < <(lspci -D -d 8848:8620 2>/dev/null | awk '{print $1}')
 
 echo "Devices matched: $device_count"
 echo "Devices configured successfully: $successful_devices"
