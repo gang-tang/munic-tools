@@ -48,7 +48,7 @@ while read bdf; do
             echo "状态: 失败"
         fi
     fi
-done < <(lspci -D -d 8848: 2>/dev/null | awk '{print $1}')
+done < <(lspci -D -d 8848:8260 2>/dev/null | awk '{print $1}')
 
 echo ""
 echo "====================================="

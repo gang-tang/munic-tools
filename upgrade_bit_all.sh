@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-APP_DIR="/home/munic/hihan/sw/sw-driver/tools/rsu-tool/app"
-RPD_FILE="/home/munic/FPGA_BITS/munic_test_r2126/munic_test.rpd"
+APP_DIR="/home/munic/mucse/sw/sw-driver/tools/rsu-tool/app"
+RPD_FILE="/home/munic/munic_test_r2185/munic_test.rpd"
 VENDOR_ID="8848"
 
 # Ensure script is run as root
